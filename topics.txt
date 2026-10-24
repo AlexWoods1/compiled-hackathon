@@ -1,4 +1,0 @@
-# One sensitive word or phrase per line. Lines starting with # are ignored.
-taco
-burrito
-project falcon
