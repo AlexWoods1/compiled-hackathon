@@ -10,15 +10,33 @@ try:
     from src import device as device_mod
     from src import player as player_mod
     from src import cli as cli_mod
-    from src.device import find_virtual_cable_device, format_device_table, get_output_device
-    from src.player import AudioSpecs, get_audio_specs, play_file, subtype_to_dtype
+    from src.device import (
+        find_virtual_cable_device,
+        format_device_table,
+        get_output_device,
+    )
+    from src.player import (
+        AudioSpecs,
+        get_audio_specs,
+        play_file,
+        subtype_to_dtype,
+    )
     from src.cli import main
 except ImportError:
     from mic_audio_output.src import device as device_mod
     from mic_audio_output.src import player as player_mod
     from mic_audio_output.src import cli as cli_mod
-    from mic_audio_output.src.device import find_virtual_cable_device, format_device_table, get_output_device
-    from mic_audio_output.src.player import AudioSpecs, get_audio_specs, play_file, subtype_to_dtype
+    from mic_audio_output.src.device import (
+        find_virtual_cable_device,
+        format_device_table,
+        get_output_device,
+    )
+    from mic_audio_output.src.player import (
+        AudioSpecs,
+        get_audio_specs,
+        play_file,
+        subtype_to_dtype,
+    )
     from mic_audio_output.src.cli import main
 
 
@@ -60,7 +78,9 @@ def wav_48k_stereo_float(tmp_path):
     duration = 0.5
     frames = int(sr * duration)
     t = np.linspace(0, duration, frames, endpoint=False)
-    data = np.column_stack([np.sin(2 * np.pi * 880 * t), np.cos(2 * np.pi * 880 * t)]).astype(np.float32)
+    left = np.sin(2 * np.pi * 880 * t)
+    right = np.cos(2 * np.pi * 880 * t)
+    data = np.column_stack([left, right]).astype(np.float32)
     sf.write(path, data, sr, subtype="FLOAT")
     return path, sr, 2, "FLOAT", "float32"
 
@@ -88,7 +108,9 @@ def test_audio_specs_matching_44k_stereo(wav_44k_stereo):
 
 
 def test_audio_specs_matching_48k_float(wav_48k_stereo_float):
-    path, expected_sr, expected_ch, expected_sub, expected_dtype = wav_48k_stereo_float
+    path, expected_sr, expected_ch, expected_sub, expected_dtype = (
+        wav_48k_stereo_float
+    )
     specs = get_audio_specs(path)
     assert specs.samplerate == expected_sr
     assert specs.channels == expected_ch
@@ -146,21 +168,27 @@ def test_find_virtual_cable_detected():
 
 
 def test_get_output_device_auto_virtual():
-    idx, name, is_virtual = get_output_device(device_query=None, devices=MOCK_DEVICES)
+    idx, name, is_virtual = get_output_device(
+        device_query=None, devices=MOCK_DEVICES
+    )
     assert idx == 2
     assert "VB-Audio" in name
     assert is_virtual is True
 
 
 def test_get_output_device_explicit_index():
-    idx, name, is_virtual = get_output_device(device_query="1", devices=MOCK_DEVICES)
+    idx, name, is_virtual = get_output_device(
+        device_query="1", devices=MOCK_DEVICES
+    )
     assert idx == 1
     assert "Speakers" in name
     assert is_virtual is False
 
 
 def test_get_output_device_explicit_name_substring():
-    idx, name, is_virtual = get_output_device(device_query="blackhole", devices=MOCK_DEVICES)
+    idx, name, is_virtual = get_output_device(
+        device_query="blackhole", devices=MOCK_DEVICES
+    )
     assert idx == 3
     assert "BlackHole" in name
     assert is_virtual is True
@@ -187,9 +215,11 @@ def test_play_file_passes_exact_audio_specs(wav_16k_mono):
     mock_stream_instance = MagicMock()
     mock_stream_class = MagicMock(return_value=mock_stream_instance)
 
-    with patch.object(player_mod.sd, "OutputStream", mock_stream_class), \
-         patch.object(player_mod, "get_output_device", return_value=(2, "CABLE Input", True)):
-
+    with patch.object(player_mod.sd, "OutputStream", mock_stream_class), patch.object(
+        player_mod,
+        "get_output_device",
+        return_value=(2, "CABLE Input", True),
+    ):
         play_file(path, device=None, blocksize=512)
 
         # Assert OutputStream was configured with exact specifications from the WAV file

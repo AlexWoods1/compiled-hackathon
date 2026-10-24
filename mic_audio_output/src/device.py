@@ -5,14 +5,14 @@ import sounddevice as sd
 
 # Common keywords for virtual audio cables across platforms
 VIRTUAL_DEVICE_KEYWORDS = [
-    "cable input",       # VB-Audio Cable (Windows)
-    "vb-audio",          # VB-Audio Cable alternative name
-    "blackhole",         # BlackHole (macOS)
-    "virtual audio",     # General virtual audio drivers
-    "loopback",          # ALSA / Pulse / Jack loopbacks
-    "virtual cable",     # Virtual Audio Cable (VAC)
-    "steam streaming",   # Steam virtual mic sink
-    "voicemeeter",       # Voicemeeter aux/vaio
+    "cable input",  # VB-Audio Cable (Windows)
+    "vb-audio",  # VB-Audio Cable alternative name
+    "blackhole",  # BlackHole (macOS)
+    "virtual audio",  # General virtual audio drivers
+    "loopback",  # ALSA / Pulse / Jack loopbacks
+    "virtual cable",  # Virtual Audio Cable (VAC)
+    "steam streaming",  # Steam virtual mic sink
+    "voicemeeter",  # Voicemeeter aux/vaio
 ]
 
 
@@ -33,22 +33,33 @@ def format_device_table(devices: Optional[List[Dict[str, Any]]] = None) -> str:
         devices = list_devices()
 
     lines = [
-        f"{'Idx':<4} {'Type':<8} {'Channels (In/Out)':<18} {'Sample Rate':<12} {'Device Name'}",
+        f"{'Idx':<4} {'Type':<8} {'Channels (In/Out)':<18} "
+        f"{'Sample Rate':<12} {'Device Name'}",
         "-" * 75,
     ]
 
     for d in devices:
         in_ch = d.get("max_input_channels", 0)
         out_ch = d.get("max_output_channels", 0)
-        dev_type = "In/Out" if (in_ch > 0 and out_ch > 0) else ("Output" if out_ch > 0 else "Input")
+        if in_ch > 0 and out_ch > 0:
+            dev_type = "In/Out"
+        elif out_ch > 0:
+            dev_type = "Output"
+        else:
+            dev_type = "Input"
         sr = f"{int(d.get('default_samplerate', 0))} Hz"
         ch_str = f"{in_ch} in / {out_ch} out"
-        lines.append(f"{d['index']:<4} {dev_type:<8} {ch_str:<18} {sr:<12} {d.get('name', 'Unknown')}")
+        lines.append(
+            f"{d['index']:<4} {dev_type:<8} {ch_str:<18} "
+            f"{sr:<12} {d.get('name', 'Unknown')}"
+        )
 
     return "\n".join(lines)
 
 
-def find_virtual_cable_device(devices: Optional[List[Dict[str, Any]]] = None) -> Optional[int]:
+def find_virtual_cable_device(
+    devices: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[int]:
     """Find the index of a virtual audio cable output endpoint.
 
     Returns the device index if found, or None.
@@ -92,19 +103,26 @@ def get_output_device(
             target_idx = int(query_str)
             match = next((d for d in output_devices if d["index"] == target_idx), None)
             if match:
-                is_virtual = any(kw in match["name"].lower() for kw in VIRTUAL_DEVICE_KEYWORDS)
+                is_virtual = any(
+                    kw in match["name"].lower() for kw in VIRTUAL_DEVICE_KEYWORDS
+                )
                 return match["index"], match["name"], is_virtual
-            raise ValueError(f"Device index {target_idx} is not a valid output device.")
+            raise ValueError(
+                f"Device index {target_idx} is not a valid output device."
+            )
 
         # Substring search in device name
         matches = [d for d in output_devices if query_str.lower() in d["name"].lower()]
         if matches:
             match = matches[0]
-            is_virtual = any(kw in match["name"].lower() for kw in VIRTUAL_DEVICE_KEYWORDS)
+            is_virtual = any(
+                kw in match["name"].lower() for kw in VIRTUAL_DEVICE_KEYWORDS
+            )
             return match["index"], match["name"], is_virtual
 
         raise ValueError(
-            f"No output audio device matched query '{device_query}'. Run with --list-devices to see options."
+            f"No output audio device matched query '{device_query}'. "
+            "Run with --list-devices to see options."
         )
 
     # 2. Auto-detect virtual audio cable
@@ -116,7 +134,9 @@ def get_output_device(
     # 3. Fallback to default output device
     default_out_idx = sd.default.device[1]
     if default_out_idx is not None and default_out_idx >= 0:
-        match = next((d for d in output_devices if d["index"] == default_out_idx), None)
+        match = next(
+            (d for d in output_devices if d["index"] == default_out_idx), None
+        )
         if match:
             return match["index"], match["name"], False
 

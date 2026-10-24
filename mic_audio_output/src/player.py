@@ -15,6 +15,7 @@ from .device import get_output_device
 @dataclass
 class AudioSpecs:
     """Audio specifications extracted directly from the audio file."""
+
     samplerate: int
     channels: int
     subtype: str
@@ -24,10 +25,13 @@ class AudioSpecs:
     dtype: str
 
     def __str__(self) -> str:
-        ch_label = "Mono (1ch)" if self.channels == 1 else f"Stereo ({self.channels}ch)"
+        ch_label = (
+            "Mono (1ch)" if self.channels == 1 else f"Stereo ({self.channels}ch)"
+        )
         return (
             f"Sample Rate: {self.samplerate} Hz | Channels: {ch_label} | "
-            f"Subtype: {self.subtype} ({self.dtype}) | Duration: {self.duration_seconds:.2f}s"
+            f"Subtype: {self.subtype} ({self.dtype}) | "
+            f"Duration: {self.duration_seconds:.2f}s"
         )
 
 
@@ -52,7 +56,9 @@ def get_audio_specs(filepath: str) -> AudioSpecs:
         raise FileNotFoundError(f"Audio file not found: {filepath}")
 
     with sf.SoundFile(filepath) as f:
-        duration = float(f.frames) / float(f.samplerate) if f.samplerate > 0 else 0.0
+        duration = (
+            float(f.frames) / float(f.samplerate) if f.samplerate > 0 else 0.0
+        )
         dtype = subtype_to_dtype(f.subtype)
         return AudioSpecs(
             samplerate=f.samplerate,
@@ -90,9 +96,13 @@ def play_file(
     print(f"[*] Incoming Specs: {specs}")
     print(f"[*] Target Output Device [{target_idx}]: {target_name}")
     if is_virtual:
-        print("    -> Virtual audio cable detected! Audio will route to virtual microphone.")
+        print(
+            "    -> Virtual audio cable detected! Audio will route to virtual microphone."
+        )
     else:
-        print("    -> Warning: Not a recognized virtual cable. Audio will play to standard output.")
+        print(
+            "    -> Warning: Not a recognized virtual cable. Audio will play to standard output."
+        )
 
     while True:
         with sf.SoundFile(filepath) as f:
@@ -109,9 +119,12 @@ def play_file(
                     blocksize=blocksize,
                 )
             except Exception as e:
-                # If the device driver strictly enforces stereo (2 channels) while WAV is mono (1 channel)
+                # If the device driver strictly enforces stereo (2 channels) while WAV is mono
                 if specs.channels == 1:
-                    print(f"[*] Driver requested adaptation: attempting stereo streaming with duplicated channels...")
+                    print(
+                        "[*] Driver requested adaptation: attempting stereo streaming "
+                        "with duplicated channels..."
+                    )
                     stream_channels = 2
                     needs_channel_duplication = True
                     out_stream = sd.OutputStream(
@@ -139,7 +152,9 @@ def play_file(
                         if "int" in specs.dtype:
                             # Clamp integer ranges to prevent overflow
                             info = np.iinfo(data.dtype)
-                            data = np.clip(data, info.min, info.max).astype(specs.dtype)
+                            data = np.clip(data, info.min, info.max).astype(
+                                specs.dtype
+                            )
 
                     # Adapt mono to stereo if the hardware driver requires 2 channels
                     if needs_channel_duplication:
@@ -151,12 +166,21 @@ def play_file(
                     out_stream.write(data)
                     frames_played += len(data)
 
-                    current_sec = min(specs.duration_seconds, frames_played / specs.samplerate)
+                    current_sec = min(
+                        specs.duration_seconds, frames_played / specs.samplerate
+                    )
                     if progress_callback:
                         progress_callback(current_sec, specs.duration_seconds)
                     else:
-                        pct = (frames_played / total_frames) * 100 if total_frames > 0 else 100
-                        sys.stdout.write(f"\rStreaming: {pct:5.1f}% [{current_sec:5.1f}s / {specs.duration_seconds:5.1f}s]")
+                        pct = (
+                            (frames_played / total_frames) * 100
+                            if total_frames > 0
+                            else 100
+                        )
+                        sys.stdout.write(
+                            f"\rStreaming: {pct:5.1f}% "
+                            f"[{current_sec:5.1f}s / {specs.duration_seconds:5.1f}s]"
+                        )
                         sys.stdout.flush()
 
                 sys.stdout.write("\n")

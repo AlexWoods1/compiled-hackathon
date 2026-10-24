@@ -9,27 +9,36 @@ from .player import get_audio_specs, play_file
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mic_audio_output",
-        description="Stream audio files directly to a virtual microphone for Zoom and voice apps.",
+        description=(
+            "Stream audio files directly to a virtual microphone for Zoom and voice apps."
+        ),
     )
     parser.add_argument(
-        "-f", "--file",
+        "-f",
+        "--file",
         dest="filepath",
         type=str,
         help="Path to the .wav audio file to play.",
     )
     parser.add_argument(
-        "-d", "--device",
+        "-d",
+        "--device",
         type=str,
         default=None,
-        help="Target output device index or substring name (default: auto-detect virtual cable).",
+        help=(
+            "Target output device index or substring name "
+            "(default: auto-detect virtual cable)."
+        ),
     )
     parser.add_argument(
-        "-l", "--list-devices",
+        "-l",
+        "--list-devices",
         action="store_true",
         help="List all detected audio devices with indices and exit.",
     )
     parser.add_argument(
-        "-v", "--volume",
+        "-v",
+        "--volume",
         type=float,
         default=1.0,
         help="Volume multiplier (default: 1.0).",
@@ -58,7 +67,10 @@ def main(args=None):
 
     if not parsed.filepath:
         parser.print_help()
-        print("\nError: Please specify an audio file using --file / -f, or use --list-devices.")
+        print(
+            "\nError: Please specify an audio file using --file / -f, "
+            "or use --list-devices."
+        )
         return 1
 
     try:
