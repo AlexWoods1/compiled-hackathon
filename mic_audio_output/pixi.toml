@@ -1,0 +1,18 @@
+[workspace]
+channels = ["conda-forge"]
+name = "mic_audio_output"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[tasks]
+list-devices = "python -m src.cli --list-devices"
+play = "python -m src.cli"
+test = "pytest tests"
+generate-sample = "python generate_sample.py"
+
+[dependencies]
+python = ">=3.11"
+python-sounddevice = ">=0.4.6"
+pysoundfile = ">=0.12.1"
+numpy = ">=1.24"
+pytest = ">=8.0.0"
