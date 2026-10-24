@@ -36,6 +36,6 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install pytest
-        run: python -m pip install "pytest==${PYTEST_VERSION}"
+        run: python -m pip install "pytest==${PYTEST_VERSION}" "numpy>=2.2"
       - name: Run pytest
         run: python -m pytest

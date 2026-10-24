@@ -1,10 +1,9 @@
-"""Tests for the hackathon entry point."""
+"""Tests for the project entry point."""
 
-from main import main
+import live_censor
+import main
 
 
-def test_main_prints_greeting(capsys):
-    """main writes the project greeting to stdout."""
-    main()
-    captured = capsys.readouterr()
-    assert captured.out == "Hello from compiled-hackathon!\n"
+def test_entry_point_runs_the_censor():
+    """python main.py starts the live censor."""
+    assert main.main is live_censor.main
