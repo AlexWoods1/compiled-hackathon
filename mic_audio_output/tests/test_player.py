@@ -108,9 +108,7 @@ def test_audio_specs_matching_44k_stereo(wav_44k_stereo):
 
 
 def test_audio_specs_matching_48k_float(wav_48k_stereo_float):
-    path, expected_sr, expected_ch, expected_sub, expected_dtype = (
-        wav_48k_stereo_float
-    )
+    path, expected_sr, expected_ch, expected_sub, expected_dtype = wav_48k_stereo_float
     specs = get_audio_specs(path)
     assert specs.samplerate == expected_sr
     assert specs.channels == expected_ch
@@ -168,18 +166,14 @@ def test_find_virtual_cable_detected():
 
 
 def test_get_output_device_auto_virtual():
-    idx, name, is_virtual = get_output_device(
-        device_query=None, devices=MOCK_DEVICES
-    )
+    idx, name, is_virtual = get_output_device(device_query=None, devices=MOCK_DEVICES)
     assert idx == 2
     assert "VB-Audio" in name
     assert is_virtual is True
 
 
 def test_get_output_device_explicit_index():
-    idx, name, is_virtual = get_output_device(
-        device_query="1", devices=MOCK_DEVICES
-    )
+    idx, name, is_virtual = get_output_device(device_query="1", devices=MOCK_DEVICES)
     assert idx == 1
     assert "Speakers" in name
     assert is_virtual is False
@@ -215,10 +209,13 @@ def test_play_file_passes_exact_audio_specs(wav_16k_mono):
     mock_stream_instance = MagicMock()
     mock_stream_class = MagicMock(return_value=mock_stream_instance)
 
-    with patch.object(player_mod.sd, "OutputStream", mock_stream_class), patch.object(
-        player_mod,
-        "get_output_device",
-        return_value=(2, "CABLE Input", True),
+    with (
+        patch.object(player_mod.sd, "OutputStream", mock_stream_class),
+        patch.object(
+            player_mod,
+            "get_output_device",
+            return_value=(2, "CABLE Input", True),
+        ),
     ):
         play_file(path, device=None, blocksize=512)
 

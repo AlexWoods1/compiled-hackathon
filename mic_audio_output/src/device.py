@@ -107,9 +107,7 @@ def get_output_device(
                     kw in match["name"].lower() for kw in VIRTUAL_DEVICE_KEYWORDS
                 )
                 return match["index"], match["name"], is_virtual
-            raise ValueError(
-                f"Device index {target_idx} is not a valid output device."
-            )
+            raise ValueError(f"Device index {target_idx} is not a valid output device.")
 
         # Substring search in device name
         matches = [d for d in output_devices if query_str.lower() in d["name"].lower()]
@@ -134,9 +132,7 @@ def get_output_device(
     # 3. Fallback to default output device
     default_out_idx = sd.default.device[1]
     if default_out_idx is not None and default_out_idx >= 0:
-        match = next(
-            (d for d in output_devices if d["index"] == default_out_idx), None
-        )
+        match = next((d for d in output_devices if d["index"] == default_out_idx), None)
         if match:
             return match["index"], match["name"], False
 

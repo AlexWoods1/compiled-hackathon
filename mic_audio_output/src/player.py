@@ -25,9 +25,7 @@ class AudioSpecs:
     dtype: str
 
     def __str__(self) -> str:
-        ch_label = (
-            "Mono (1ch)" if self.channels == 1 else f"Stereo ({self.channels}ch)"
-        )
+        ch_label = "Mono (1ch)" if self.channels == 1 else f"Stereo ({self.channels}ch)"
         return (
             f"Sample Rate: {self.samplerate} Hz | Channels: {ch_label} | "
             f"Subtype: {self.subtype} ({self.dtype}) | "
@@ -56,9 +54,7 @@ def get_audio_specs(filepath: str) -> AudioSpecs:
         raise FileNotFoundError(f"Audio file not found: {filepath}")
 
     with sf.SoundFile(filepath) as f:
-        duration = (
-            float(f.frames) / float(f.samplerate) if f.samplerate > 0 else 0.0
-        )
+        duration = float(f.frames) / float(f.samplerate) if f.samplerate > 0 else 0.0
         dtype = subtype_to_dtype(f.subtype)
         return AudioSpecs(
             samplerate=f.samplerate,
@@ -152,9 +148,7 @@ def play_file(
                         if "int" in specs.dtype:
                             # Clamp integer ranges to prevent overflow
                             info = np.iinfo(data.dtype)
-                            data = np.clip(data, info.min, info.max).astype(
-                                specs.dtype
-                            )
+                            data = np.clip(data, info.min, info.max).astype(specs.dtype)
 
                     # Adapt mono to stereo if the hardware driver requires 2 channels
                     if needs_channel_duplication:
