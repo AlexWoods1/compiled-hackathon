@@ -1,0 +1,22 @@
+[project]
+name = "compiled-hackathon"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "black==26.10.1",
+    "pytest==9.1.1",
+]
+
+[tool.black]
+required-version = "26.10.1"
+target-version = ["py314"]
+line-length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
