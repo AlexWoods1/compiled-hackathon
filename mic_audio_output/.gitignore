@@ -1,0 +1,11 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python & caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated audio test files
+*.wav
