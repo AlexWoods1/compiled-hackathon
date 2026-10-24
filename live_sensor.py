@@ -153,20 +153,23 @@ def main():
     out_dev = find_device(args.out_device, "output")
     threading.Thread(target=worker, daemon=True).start()
 
-    with sd.InputStream(
-        device=in_dev,
-        samplerate=DEV_SR,
-        channels=1,
-        dtype="float32",
-        blocksize=1024,
-        callback=on_input,
-    ), sd.OutputStream(
-        device=out_dev,
-        samplerate=DEV_SR,
-        channels=1,
-        dtype="float32",
-        blocksize=1024,
-        callback=on_output,
+    with (
+        sd.InputStream(
+            device=in_dev,
+            samplerate=DEV_SR,
+            channels=1,
+            dtype="float32",
+            blocksize=1024,
+            callback=on_input,
+        ),
+        sd.OutputStream(
+            device=out_dev,
+            samplerate=DEV_SR,
+            channels=1,
+            dtype="float32",
+            blocksize=1024,
+            callback=on_output,
+        ),
     ):
         print(f"Live. Censoring: {', '.join(labels)}. Ctrl+C to stop.")
         try:
