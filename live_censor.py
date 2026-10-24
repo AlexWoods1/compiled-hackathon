@@ -42,7 +42,11 @@ BLOCKSIZE = 1024
 PAD = 0.08
 NOISE_VOL = 0.15
 NO_SPEECH_PROB = 0.6
-# * A couple of chunks of delay is the live buffer. Warn only past this.
+# * Only this much of the held chunk is transcribed again, so a word on the
+# * boundary is still caught without re-reading the whole previous chunk.
+OVERLAP_SECONDS = 0.45
+# * Audio waiting beyond this many chunks is dropped so the delay cannot grow.
+MAX_PENDING_CHUNKS = 2
 BACKLOG_WARN_SECONDS = 8.0
 BACKLOG_WARN_INTERVAL = 15.0
 
@@ -249,6 +253,78 @@ def downsample(window):
     return audio.reshape(-1, DOWN).mean(axis=1).astype(np.float32)
 
 
+def overlap_sample_count(chunk_n: int) -> int:
+    """Return how many samples of the held chunk are checked again.
+
+    Args:
+        chunk_n: Samples in one chunk. Already divisible by the downsample factor.
+
+    Returns:
+        Overlap length, shorter than the chunk, and divisible by the
+        downsample factor.
+    """
+    overlap = (int(OVERLAP_SECONDS * DEV_SR) // DOWN) * DOWN
+    if overlap <= 0 or overlap >= chunk_n:
+        overlap = max(DOWN, (chunk_n // 3 // DOWN) * DOWN)
+    return overlap
+
+
+def drop_stale_audio(pending, chunk_n: int):
+    """Drop queued audio that would push the live delay too far.
+
+    Args:
+        pending: Samples waiting to be transcribed, oldest first.
+        chunk_n: Samples in one chunk.
+
+    Returns:
+        The pending buffer, and how many seconds were discarded. Discarded
+        audio is never played.
+    """
+    limit = chunk_n * MAX_PENDING_CHUNKS
+    if chunk_n <= 0 or len(pending) <= limit:
+        return pending, 0.0
+    dropped = len(pending) - chunk_n
+    return pending[-chunk_n:].copy(), dropped / DEV_SR
+
+
+def split_boundary_spans(
+    spans: list[CensorSpan], overlap_samples: int, sample_rate: int
+) -> tuple[list[CensorSpan], list[CensorSpan]]:
+    """Split spans into the held tail and the new chunk.
+
+    Args:
+        spans: Spans whose times start at the beginning of tail plus new audio.
+        overlap_samples: Length of the tail that belongs to the held chunk.
+        sample_rate: Sample rate shared by both pieces.
+
+    Returns:
+        Tail spans rebased to the start of the tail, and new-chunk spans
+        rebased to the start of the new chunk. A word across the boundary
+        is clipped into both sides.
+    """
+    overlap_s = overlap_samples / sample_rate
+    tail_spans = []
+    new_spans = []
+    for span in spans:
+        if span.start < overlap_s and span.end > 0:
+            tail_spans.append(
+                CensorSpan(
+                    start=max(0.0, span.start),
+                    end=min(overlap_s, span.end),
+                    topic=span.topic,
+                )
+            )
+        if span.end > overlap_s:
+            new_spans.append(
+                CensorSpan(
+                    start=max(0.0, span.start - overlap_s),
+                    end=span.end - overlap_s,
+                    topic=span.topic,
+                )
+            )
+    return tail_spans, new_spans
+
+
 def should_report_backlog(
     backlog: float, chunk: float, now: float, last_report: float
 ) -> bool:
@@ -402,7 +478,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--chunk",
         type=float,
-        default=1.5,
+        default=1.2,
         help="chunk length in seconds",
     )
     parser.add_argument("--list-devices", action="store_true")
@@ -440,24 +516,20 @@ def transcribe_window(model, window, topics: list[str]) -> list[HeardWord]:
     return words_from_segments(segments)
 
 
-def censor_window(window, heard: list[HeardWord], topics: list[str], verbose: bool):
-    """Apply static to banned phrases inside one window.
+def _report_censor(
+    heard: list[HeardWord], spans: list[CensorSpan], verbose: bool
+) -> None:
+    """Print each bleep, and the transcript when verbose mode is on.
 
     Args:
-        window: 48 kHz samples.
-        heard: Words whose times line up with window.
-        topics: Banned phrases.
+        heard: Words from the window that was just transcribed.
+        spans: Banned phrases found in those words.
         verbose: When True, print the transcript as well as each bleep.
-
-    Returns:
-        The censored samples and the spans that were covered.
     """
-    spans = find_banned_spans(heard, topics)
     for span in spans:
         print(f"   BLEEPED: '{span.topic}'", flush=True)
     if verbose and heard:
         print("heard:", " ".join(word.word.strip() for word in heard), flush=True)
-    return apply_static(window, spans, DEV_SR), spans
 
 
 def load_model(whisper_model, model_name: str, device: str, compute_type: str):
@@ -553,36 +625,56 @@ def run(args: argparse.Namespace) -> None:
 
     def worker() -> None:
         pending = np.zeros(0, dtype=np.float32)
-        prev = None
+        hold_raw = None
+        hold_out = None
         last_report = 0.0
+        overlap_n = overlap_sample_count(chunk_n)
         while not stop.is_set():
             try:
                 block = in_q.get(timeout=0.2)
             except queue.Empty:
                 continue
             pending = np.concatenate([pending, block])
+            pending, dropped = drop_stale_audio(pending, chunk_n)
+            if dropped:
+                print(
+                    f"   [warn] skipped {dropped:.1f}s to stay live.",
+                    flush=True,
+                )
             if len(pending) < chunk_n:
                 continue
             current = pending[:chunk_n].copy()
             pending = pending[chunk_n:]
             try:
-                if prev is None:
+                if hold_raw is None:
                     heard = transcribe_window(model, current, topics)
-                    prev, _spans = censor_window(current, heard, topics, args.verbose)
+                    spans = find_banned_spans(heard, topics)
+                    _report_censor(heard, spans, args.verbose)
+                    hold_raw = current
+                    hold_out = apply_static(current, spans, DEV_SR)
                     continue
-                # * The overlap keeps a phrase that starts in the previous chunk.
-                combined = np.concatenate([prev, current])
-                heard = transcribe_window(model, combined, topics)
-                censored, _spans = censor_window(combined, heard, topics, args.verbose)
-                emit(censored[: len(prev)])
-                prev = censored[len(prev) :]
+                # * The new chunk is transcribed once. Only a short tail of the
+                # * held chunk is included, so a word on the boundary is visible.
+                tail = hold_raw[-overlap_n:]
+                heard = transcribe_window(
+                    model, np.concatenate([tail, current]), topics
+                )
+                spans = find_banned_spans(heard, topics)
+                _report_censor(heard, spans, args.verbose)
+                tail_spans, new_spans = split_boundary_spans(spans, overlap_n, DEV_SR)
+                censored_tail = apply_static(tail, tail_spans, DEV_SR)
+                hold_out = np.concatenate([hold_out[:-overlap_n], censored_tail])
+                emit(hold_out)
+                hold_raw = current
+                hold_out = apply_static(current, new_spans, DEV_SR)
             except Exception as exc:
                 print(f"   [warn] transcription failed: {exc}", file=sys.stderr)
-                if prev is not None:
-                    emit(prev)
-                prev = current
+                if hold_out is not None:
+                    emit(hold_out)
+                hold_raw = current
+                hold_out = current.copy()
                 continue
-            backlog = in_q.qsize() * BLOCKSIZE / DEV_SR
+            backlog = (in_q.qsize() * BLOCKSIZE + len(pending)) / DEV_SR
             now = time.monotonic()
             if should_report_backlog(backlog, args.chunk, now, last_report):
                 last_report = now
@@ -590,8 +682,8 @@ def run(args: argparse.Namespace) -> None:
                     f"   [warn] audio is about {backlog:.0f}s behind.",
                     flush=True,
                 )
-        if prev is not None:
-            emit(prev)
+        if hold_out is not None:
+            emit(hold_out)
 
     in_dev = find_device(sd, args.in_device, "input")
     out_dev = find_device(sd, args.out_device, "output")
@@ -620,7 +712,7 @@ def run(args: argparse.Namespace) -> None:
         print(
             "Live. Censoring: "
             + ", ".join(topics)
-            + ". Delay is about two chunks. Ctrl+C to stop."
+            + ". Delay is about one chunk. Ctrl+C to stop."
         )
         try:
             while True:

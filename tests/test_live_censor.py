@@ -10,10 +10,13 @@ from live_censor import (
     HeardWord,
     apply_static,
     collect_topics,
+    drop_stale_audio,
     find_banned_spans,
     fresh_status,
     load_topics,
+    overlap_sample_count,
     should_report_backlog,
+    split_boundary_spans,
     tokens_match,
     words_from_segments,
 )
@@ -125,6 +128,34 @@ def test_stream_status_prints_once():
     assert fresh_status("input overflow", seen) == "input overflow"
     assert fresh_status("input overflow", seen) is None
     assert fresh_status("output underflow", seen) == "output underflow"
+
+
+def test_drop_stale_audio_keeps_only_the_newest_chunk():
+    """Audio older than the live cap is discarded instead of stretching the delay."""
+    pending = np.arange(48000 * 5, dtype=np.float32)
+    kept, dropped = drop_stale_audio(pending, 48000)
+    assert dropped == 4.0
+    assert len(kept) == 48000
+    assert kept[0] == pending[-48000]
+
+
+def test_short_queue_is_not_dropped():
+    """A normal chunk of pending audio stays intact."""
+    pending = np.ones(48000, dtype=np.float32)
+    kept, dropped = drop_stale_audio(pending, 48000)
+    assert dropped == 0.0
+    assert len(kept) == 48000
+
+
+def test_boundary_word_is_split_across_the_overlap():
+    """A phrase that crosses the chunk boundary censors both sides."""
+    overlap = overlap_sample_count(48000)
+    spans = [CensorSpan(start=0.30, end=0.70, topic="tacos")]
+    tail, new = split_boundary_spans(spans, overlap, 48000)
+    assert tail[0].start == 0.30
+    assert tail[0].end == pytest.approx(overlap / 48000)
+    assert new[0].start == 0.0
+    assert new[0].end == pytest.approx(0.70 - overlap / 48000)
 
 
 def test_apply_static_changes_only_the_matched_span():
