@@ -31,10 +31,11 @@ DEMO_TOPICS = Path(__file__).resolve().parents[1] / "demo" / "private_topics.txt
 
 
 def test_demo_topics_include_the_dinner_word():
-    """The demo topics file bans the dinner buzz word and a multi-word secret."""
+    """The demo topics file bans the dinner word and the secret words."""
     phrases = load_topics(DEMO_TOPICS)
     assert "tacos" in phrases
-    assert "production database password" in phrases
+    assert "password" in phrases
+    assert "prototype" in phrases
 
 
 def test_tokens_match_simple_plurals():
