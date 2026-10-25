@@ -41,8 +41,8 @@ BLOCKSIZE = 1024
 PAD = 0.08
 NOISE_VOL = 0.15
 NO_SPEECH_PROB = 0.6
-# * Used when a hit is split across two windows. The live loop censors the
-# * whole chunk and does not wait on a second window.
+# * The end of each chunk stays unplayed until the next chunk is transcribed,
+# * so a phrase that crosses the cut is still censored.
 OVERLAP_SECONDS = 0.25
 # * Audio waiting beyond this many chunks is dropped so the delay cannot grow.
 MAX_PENDING_CHUNKS = 2
@@ -250,6 +250,41 @@ def words_from_segments(segments) -> list[HeardWord]:
                 continue
             heard.append(HeardWord(word.word, float(word.start), float(word.end)))
     return heard
+
+
+def release_chunk(held, held_static: bool, current, hits: bool, tail_n: int):
+    """Play the audio that is safe and hold the tail for the next check.
+
+    Args:
+        held: Tail from the previous chunk. Empty on the first chunk.
+        held_static: True when that tail comes from a chunk that already hit.
+        current: The new chunk.
+        hits: True when the transcript of the held tail plus this chunk
+            contains a banned phrase.
+        tail_n: Samples at the end of current that stay held.
+
+    Returns:
+        Audio to play now, the raw tail still held, and whether that tail
+        must play as static.
+    """
+    import numpy as np
+
+    current = np.asarray(current, dtype=np.float32)
+    held = np.asarray(held, dtype=np.float32)
+    if tail_n <= 0 or tail_n >= len(current):
+        parts = [held, current] if len(held) else [current]
+        audio = np.concatenate(parts)
+        if held_static or hits:
+            audio = replace_with_static(audio)
+        return audio, np.zeros(0, dtype=np.float32), False
+
+    body = current[:-tail_n]
+    tail = current[-tail_n:].copy()
+    lead = replace_with_static(held) if held_static and len(held) else held
+    play = np.concatenate([lead, body]) if len(lead) else body
+    if hits:
+        play = replace_with_static(play)
+    return play, tail, bool(hits)
 
 
 def replace_with_static(samples):
@@ -750,7 +785,10 @@ def run(args: argparse.Namespace) -> None:
 
     def worker() -> None:
         pending = np.zeros(0, dtype=np.float32)
+        held = np.zeros(0, dtype=np.float32)
+        held_static = False
         last_report = 0.0
+        tail_n = overlap_sample_count(chunk_n, capture_rate)
         while not stop.is_set():
             blocks = []
             while True:
@@ -773,17 +811,32 @@ def run(args: argparse.Namespace) -> None:
                 continue
             current = pending[:chunk_n].copy()
             pending = pending[chunk_n:]
+            if dropped and len(held):
+                # * A skip breaks the timeline, so the old tail is not part of
+                # * this chunk's transcript.
+                stale = replace_with_static(held) if held_static else held
+                emit(playback_audio(stale, capture_rate, playback_rate))
+                held = np.zeros(0, dtype=np.float32)
+                held_static = False
             try:
-                # * The chunk plays as soon as its text is ready. A banned
-                # * phrase replaces the whole chunk, so word times are unused.
-                heard = transcribe_window(model, current, topics, capture_rate)
+                # * The tail is still unplayed. Hearing it again with the new
+                # * chunk catches a phrase that crosses the cut.
+                window = np.concatenate([held, current]) if len(held) else current
+                heard = transcribe_window(model, window, topics, capture_rate)
                 hits = matched_topics(heard, topics)
                 _report_censor(heard, hits, args.verbose)
-                audio = replace_with_static(current) if hits else current
-                emit(playback_audio(audio, capture_rate, playback_rate))
+                play, held, held_static = release_chunk(
+                    held, held_static, current, bool(hits), tail_n
+                )
+                emit(playback_audio(play, capture_rate, playback_rate))
             except Exception as exc:
                 print(f"   [warn] transcription failed: {exc}", file=sys.stderr)
+                if len(held):
+                    stale = replace_with_static(held) if held_static else held
+                    emit(playback_audio(stale, capture_rate, playback_rate))
                 emit(playback_audio(current, capture_rate, playback_rate))
+                held = np.zeros(0, dtype=np.float32)
+                held_static = False
                 continue
             backlog = (in_q.qsize() * BLOCKSIZE + len(pending)) / capture_rate
             now = time.monotonic()
@@ -793,6 +846,9 @@ def run(args: argparse.Namespace) -> None:
                     f"   [warn] audio is about {backlog:.0f}s behind.",
                     flush=True,
                 )
+        if len(held):
+            audio = replace_with_static(held) if held_static else held
+            emit(playback_audio(audio, capture_rate, playback_rate))
 
     channels = output_channels(sd, out_dev)
     worker_thread = threading.Thread(target=worker, daemon=True)

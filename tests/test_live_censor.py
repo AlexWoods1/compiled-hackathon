@@ -18,6 +18,7 @@ from live_censor import (
     load_topics,
     matched_topics,
     overlap_sample_count,
+    release_chunk,
     replace_with_static,
     should_report_backlog,
     split_boundary_spans,
@@ -194,6 +195,33 @@ def test_tokens_from_segments_skip_silence():
         Segment("hello list", 0.1),
     ]
     assert tokens_from_segments(segments) == ["hello", "list"]
+
+
+def test_clean_chunk_holds_its_tail():
+    """The end of a clean chunk stays held for the next phrase check."""
+    current = np.arange(10, dtype=np.float32)
+    play, held, held_static = release_chunk(
+        np.zeros(0, dtype=np.float32), False, current, False, 3
+    )
+    assert np.array_equal(play, current[:-3])
+    assert np.array_equal(held, current[-3:])
+    assert held_static is False
+
+
+def test_boundary_hit_censors_the_held_tail():
+    """A phrase heard across the cut censors the tail that was still held."""
+    tail = np.arange(3, dtype=np.float32)
+    current = np.arange(10, 20, dtype=np.float32)
+    play, held, held_static = release_chunk(tail, False, current, True, 3)
+    assert held_static is True
+    assert len(play) == len(tail) + len(current) - 3
+    assert np.max(np.abs(play)) <= NOISE_VOL
+    assert np.array_equal(held, current[-3:])
+    nxt = np.arange(20, 30, dtype=np.float32)
+    played, _later, flag = release_chunk(held, held_static, nxt, False, 3)
+    assert np.max(np.abs(played[:3])) <= NOISE_VOL
+    assert np.array_equal(played[3:], nxt[:-3])
+    assert flag is False
 
 
 def test_banned_chunk_is_replaced_with_static():

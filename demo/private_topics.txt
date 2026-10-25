@@ -1,5 +1,10 @@
 tacos
-unreleased earnings
-acquisition target
-customer list
-production database password
+unreleased
+earnings
+acquisition 
+target
+customer 
+list
+production 
+database 
+password
