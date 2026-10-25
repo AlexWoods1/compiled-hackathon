@@ -8,15 +8,20 @@ import pytest
 from live_censor import (
     CensorSpan,
     HeardWord,
+    NOISE_VOL,
     apply_static,
     collect_topics,
+    absorb_audio,
     drop_stale_audio,
     find_banned_spans,
     fresh_status,
     load_topics,
+    matched_topics,
     overlap_sample_count,
+    replace_with_static,
     should_report_backlog,
     split_boundary_spans,
+    tokens_from_segments,
     tokens_match,
     words_from_segments,
 )
@@ -133,29 +138,71 @@ def test_stream_status_prints_once():
 def test_drop_stale_audio_keeps_only_the_newest_chunk():
     """Audio older than the live cap is discarded instead of stretching the delay."""
     pending = np.arange(48000 * 5, dtype=np.float32)
-    kept, dropped = drop_stale_audio(pending, 48000)
+    kept, dropped = drop_stale_audio(pending, 48000, 48000)
     assert dropped == 4.0
     assert len(kept) == 48000
     assert kept[0] == pending[-48000]
 
 
+def test_absorb_audio_drops_the_queue_down_to_one_chunk():
+    """A backed-up microphone queue keeps the newest chunk and drops the rest."""
+    pending = np.zeros(0, dtype=np.float32)
+    blocks = [np.full(48000, index, dtype=np.float32) for index in range(5)]
+    kept, dropped = absorb_audio(pending, blocks, 48000, 48000)
+    assert dropped == 4.0
+    assert kept[0] == 4
+
+
 def test_short_queue_is_not_dropped():
     """A normal chunk of pending audio stays intact."""
     pending = np.ones(48000, dtype=np.float32)
-    kept, dropped = drop_stale_audio(pending, 48000)
+    kept, dropped = drop_stale_audio(pending, 48000, 48000)
     assert dropped == 0.0
     assert len(kept) == 48000
 
 
 def test_boundary_word_is_split_across_the_overlap():
     """A phrase that crosses the chunk boundary censors both sides."""
-    overlap = overlap_sample_count(48000)
-    spans = [CensorSpan(start=0.30, end=0.70, topic="tacos")]
+    overlap = overlap_sample_count(48000, 48000)
+    spans = [CensorSpan(start=0.10, end=0.50, topic="tacos")]
     tail, new = split_boundary_spans(spans, overlap, 48000)
-    assert tail[0].start == 0.30
+    assert tail[0].start == 0.10
     assert tail[0].end == pytest.approx(overlap / 48000)
     assert new[0].start == 0.0
-    assert new[0].end == pytest.approx(0.70 - overlap / 48000)
+    assert new[0].end == pytest.approx(0.50 - overlap / 48000)
+
+
+def test_phrase_match_ignores_word_times():
+    """A banned phrase is found from the tokens alone."""
+    hits = matched_topics(
+        ["the", "customer", "unreleased", "earnings", "Tacos,"],
+        ["tacos", "unreleased earnings", "customer list"],
+    )
+    assert hits == ["tacos", "unreleased earnings"]
+
+
+def test_tokens_from_segments_skip_silence():
+    """A segment the recognizer marks as silence contributes no tokens."""
+
+    class Segment:
+        def __init__(self, text, no_speech_prob):
+            self.text = text
+            self.no_speech_prob = no_speech_prob
+
+    segments = [
+        Segment("tacos", 0.9),
+        Segment("hello list", 0.1),
+    ]
+    assert tokens_from_segments(segments) == ["hello", "list"]
+
+
+def test_banned_chunk_is_replaced_with_static():
+    """A hit censors every sample in the chunk."""
+    samples = np.linspace(-0.2, 0.2, 800, dtype=np.float32)
+    censored = replace_with_static(samples)
+    assert not np.array_equal(censored, samples)
+    assert len(censored) == len(samples)
+    assert np.max(np.abs(censored)) <= NOISE_VOL
 
 
 def test_apply_static_changes_only_the_matched_span():

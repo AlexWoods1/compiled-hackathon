@@ -32,19 +32,18 @@ from pathlib import Path
 
 # * Device and censor settings. 48 kHz is what mics and virtual cables share.
 DEFAULT_TOPICS = Path(__file__).resolve().parent / "demo" / "private_topics.txt"
-DEFAULT_MODEL = "base.en"
+DEFAULT_MODEL = "tiny.en"
 DEFAULT_DEVICE = "cpu"
 DEFAULT_COMPUTE_TYPE = "int8"
 DEV_SR = 48000
 WHISPER_SR = 16000
-DOWN = DEV_SR // WHISPER_SR
 BLOCKSIZE = 1024
 PAD = 0.08
 NOISE_VOL = 0.15
 NO_SPEECH_PROB = 0.6
-# * Only this much of the held chunk is transcribed again, so a word on the
-# * boundary is still caught without re-reading the whole previous chunk.
-OVERLAP_SECONDS = 0.45
+# * Used when a hit is split across two windows. The live loop censors the
+# * whole chunk and does not wait on a second window.
+OVERLAP_SECONDS = 0.25
 # * Audio waiting beyond this many chunks is dropped so the delay cannot grow.
 MAX_PENDING_CHUNKS = 2
 BACKLOG_WARN_SECONDS = 8.0
@@ -149,6 +148,34 @@ def collect_topics(path: Path | None, extra: list[str]) -> list[str]:
     return phrases
 
 
+def matched_topics(words: list[str], topics: list[str]) -> list[str]:
+    """Return banned phrases that appear in order in the transcript.
+
+    Args:
+        words: Transcript tokens, without times.
+        topics: Banned phrases. A phrase matches only when every token lines
+            up in order.
+
+    Returns:
+        Matching phrases, in topic-list order, once each.
+    """
+    heard = [normalize_token(word) for word in words]
+    heard = [token for token in heard if token]
+    found = []
+    for topic in topics:
+        tokens = [normalize_token(part) for part in topic.split()]
+        tokens = [token for token in tokens if token]
+        if not tokens or len(tokens) > len(heard):
+            continue
+        width = len(tokens)
+        for index in range(len(heard) - width + 1):
+            window = heard[index : index + width]
+            if all(tokens_match(got, want) for got, want in zip(window, tokens)):
+                found.append(topic)
+                break
+    return found
+
+
 def find_banned_spans(words: list[HeardWord], topics: list[str]) -> list[CensorSpan]:
     """Find whole banned phrases inside a timestamped transcript.
 
@@ -188,6 +215,23 @@ def find_banned_spans(words: list[HeardWord], topics: list[str]) -> list[CensorS
     return spans
 
 
+def tokens_from_segments(segments) -> list[str]:
+    """Collect transcript tokens and drop silent segments.
+
+    Args:
+        segments: faster-whisper segments.
+
+    Returns:
+        Tokens in order. Times are ignored.
+    """
+    tokens = []
+    for segment in segments:
+        if getattr(segment, "no_speech_prob", 0.0) >= NO_SPEECH_PROB:
+            continue
+        tokens.extend((getattr(segment, "text", "") or "").split())
+    return tokens
+
+
 def words_from_segments(segments) -> list[HeardWord]:
     """Collect timestamped words and drop silent segments.
 
@@ -206,6 +250,24 @@ def words_from_segments(segments) -> list[HeardWord]:
                 continue
             heard.append(HeardWord(word.word, float(word.start), float(word.end)))
     return heard
+
+
+def replace_with_static(samples):
+    """Replace a whole chunk with static.
+
+    Args:
+        samples: One-dimensional float audio.
+
+    Returns:
+        Static of the same length. An empty chunk stays empty.
+    """
+    import numpy as np
+
+    out = np.array(samples, dtype=np.float32, copy=True)
+    if len(out) == 0:
+        return out
+    out[:] = np.random.uniform(-NOISE_VOL, NOISE_VOL, len(out)).astype(np.float32)
+    return out
 
 
 def apply_static(samples, spans: list[CensorSpan], sample_rate: int):
@@ -233,48 +295,78 @@ def apply_static(samples, spans: list[CensorSpan], sample_rate: int):
     return out
 
 
-def downsample(window):
-    """Average 48 kHz audio down to the 16 kHz rate Whisper expects.
+def resample(window, source_rate: int, target_rate: int):
+    """Change the sample rate without changing the duration.
 
     Args:
-        window: One-dimensional 48 kHz samples. Length must be divisible by 3.
+        window: One-dimensional samples at source_rate.
+        source_rate: Rate of window, in Hz.
+        target_rate: Desired rate, in Hz.
 
     Returns:
-        Float32 samples at 16 kHz.
-
-    Raises:
-        ValueError: The buffer length is not divisible by the downsample factor.
+        Float32 samples at target_rate.
     """
     import numpy as np
 
     audio = np.asarray(window, dtype=np.float32)
-    if len(audio) % DOWN != 0:
-        raise ValueError(f"Audio length {len(audio)} is not divisible by {DOWN}.")
-    return audio.reshape(-1, DOWN).mean(axis=1).astype(np.float32)
+    if source_rate == target_rate or len(audio) == 0:
+        return audio
+    target_n = max(1, int(round(len(audio) * target_rate / source_rate)))
+    source_x = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+    target_x = np.linspace(0.0, 1.0, num=target_n, endpoint=False)
+    return np.interp(target_x, source_x, audio).astype(np.float32)
 
 
-def overlap_sample_count(chunk_n: int) -> int:
+def to_whisper_rate(window, sample_rate: int):
+    """Resample captured audio to the 16 kHz rate Whisper expects.
+
+    Args:
+        window: One-dimensional samples at sample_rate.
+        sample_rate: Rate of window, in Hz.
+
+    Returns:
+        Float32 samples at 16 kHz, with the same duration as window.
+    """
+    return resample(window, sample_rate, WHISPER_SR)
+
+
+def playback_audio(samples, capture_rate: int, playback_rate: int):
+    """Match captured audio to the output device clock.
+
+    Args:
+        samples: Audio at capture_rate.
+        capture_rate: Rate of samples, in Hz.
+        playback_rate: Rate the output device expects, in Hz.
+
+    Returns:
+        Samples at playback_rate with the same duration.
+    """
+    return resample(samples, capture_rate, playback_rate)
+
+
+def overlap_sample_count(chunk_n: int, sample_rate: int) -> int:
     """Return how many samples of the held chunk are checked again.
 
     Args:
-        chunk_n: Samples in one chunk. Already divisible by the downsample factor.
+        chunk_n: Samples in one chunk.
+        sample_rate: Rate of those samples, in Hz.
 
     Returns:
-        Overlap length, shorter than the chunk, and divisible by the
-        downsample factor.
+        Overlap length, shorter than the chunk.
     """
-    overlap = (int(OVERLAP_SECONDS * DEV_SR) // DOWN) * DOWN
+    overlap = int(OVERLAP_SECONDS * sample_rate)
     if overlap <= 0 or overlap >= chunk_n:
-        overlap = max(DOWN, (chunk_n // 3 // DOWN) * DOWN)
+        overlap = max(1, chunk_n // 3)
     return overlap
 
 
-def drop_stale_audio(pending, chunk_n: int):
+def drop_stale_audio(pending, chunk_n: int, sample_rate: int):
     """Drop queued audio that would push the live delay too far.
 
     Args:
         pending: Samples waiting to be transcribed, oldest first.
         chunk_n: Samples in one chunk.
+        sample_rate: Rate of those samples, in Hz.
 
     Returns:
         The pending buffer, and how many seconds were discarded. Discarded
@@ -284,7 +376,26 @@ def drop_stale_audio(pending, chunk_n: int):
     if chunk_n <= 0 or len(pending) <= limit:
         return pending, 0.0
     dropped = len(pending) - chunk_n
-    return pending[-chunk_n:].copy(), dropped / DEV_SR
+    return pending[-chunk_n:].copy(), dropped / sample_rate
+
+
+def absorb_audio(pending, blocks, chunk_n: int, sample_rate: int):
+    """Pull every queued block in, then drop audio that is too old to play.
+
+    Args:
+        pending: Samples already pulled off the microphone queue.
+        blocks: Newer blocks waiting on the queue, oldest first.
+        chunk_n: Samples in one chunk.
+        sample_rate: Rate of those samples, in Hz.
+
+    Returns:
+        The pending buffer and the seconds of audio discarded.
+    """
+    import numpy as np
+
+    if len(blocks):
+        pending = np.concatenate([pending, *blocks])
+    return drop_stale_audio(pending, chunk_n, sample_rate)
 
 
 def split_boundary_spans(
@@ -365,18 +476,6 @@ def fresh_status(status, seen: set[str]) -> str | None:
     return text
 
 
-def build_prompt(topics: list[str]) -> str:
-    """Build a short recognizer hint from the banned phrases.
-
-    Args:
-        topics: Phrases that should be spelled the way the topics file spells them.
-
-    Returns:
-        A one-sentence prompt.
-    """
-    return "Words that may come up: " + ", ".join(topics) + "."
-
-
 def find_device(sd, name: str | None, kind: str) -> int | None:
     """Resolve a device substring to a sounddevice index.
 
@@ -398,6 +497,27 @@ def find_device(sd, name: str | None, kind: str) -> int | None:
         if name.lower() in device["name"].lower() and device[channel_key] > 0:
             return index
     raise SystemExit(f"No {kind} device matching '{name}'. Run with --list-devices.")
+
+
+def device_rate(sd, device: int | None, kind: str) -> int:
+    """Return the sample rate the device is already using.
+
+    Args:
+        sd: The sounddevice module.
+        device: Device index, or None for the default of that kind.
+        kind: "input" or "output".
+
+    Returns:
+        The device default rate in Hz.
+    """
+    if device is None:
+        info = sd.query_devices(kind=kind)
+    else:
+        info = sd.query_devices(device)
+    rate = int(info["default_samplerate"])
+    if rate <= 0:
+        return DEV_SR
+    return rate
 
 
 def output_channels(sd, device: int | None) -> int:
@@ -478,8 +598,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--chunk",
         type=float,
-        default=1.2,
-        help="chunk length in seconds",
+        default=0.6,
+        help="chunk length in seconds. The voice is delayed by one chunk plus transcription",
     )
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument(
@@ -490,46 +610,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def transcribe_window(model, window, topics: list[str]) -> list[HeardWord]:
-    """Transcribe one 48 kHz window.
+def transcribe_window(model, window, topics: list[str], sample_rate: int) -> list[str]:
+    """Transcribe one captured window.
 
     Args:
         model: Loaded WhisperModel.
-        window: 48 kHz samples whose length is divisible by 3.
+        window: Samples at sample_rate.
         topics: Phrases passed to the recognizer as hints.
+        sample_rate: Rate of window, in Hz.
 
     Returns:
-        Timestamped words. Times are relative to the start of window.
+        Transcript tokens. A banned phrase censors the whole window.
     """
-    hint = build_prompt(topics)
+    # * Hotwords bias spelling. A full sentence prompt was transcribed back as
+    # * speech, which bleeped "tacos" when nobody said it and slowed the decode.
+    # * Word alignment stays off. The chunk is censored as a whole.
     segments, _info = model.transcribe(
-        downsample(window),
+        to_whisper_rate(window, sample_rate),
         language="en",
-        word_timestamps=True,
+        word_timestamps=False,
         beam_size=1,
         temperature=0.0,
-        initial_prompt=hint,
-        hotwords=hint,
+        hotwords=", ".join(topics),
         condition_on_previous_text=False,
+        no_repeat_ngram_size=3,
         vad_filter=False,
     )
-    return words_from_segments(segments)
+    return tokens_from_segments(segments)
 
 
-def _report_censor(
-    heard: list[HeardWord], spans: list[CensorSpan], verbose: bool
-) -> None:
+def _report_censor(heard: list[str], topics_hit: list[str], verbose: bool) -> None:
     """Print each bleep, and the transcript when verbose mode is on.
 
     Args:
-        heard: Words from the window that was just transcribed.
-        spans: Banned phrases found in those words.
+        heard: Tokens from the window that was just transcribed.
+        topics_hit: Banned phrases found in those tokens.
         verbose: When True, print the transcript as well as each bleep.
     """
-    for span in spans:
-        print(f"   BLEEPED: '{span.topic}'", flush=True)
+    for topic in topics_hit:
+        print(f"   BLEEPED: '{topic}'", flush=True)
     if verbose and heard:
-        print("heard:", " ".join(word.word.strip() for word in heard), flush=True)
+        print("heard:", " ".join(heard), flush=True)
 
 
 def load_model(whisper_model, model_name: str, device: str, compute_type: str):
@@ -590,7 +711,11 @@ def run(args: argparse.Namespace) -> None:
 
     if args.chunk <= 0:
         raise ValueError("--chunk must be a positive number of seconds.")
-    chunk_n = (int(args.chunk * DEV_SR) // DOWN) * DOWN
+    in_dev = find_device(sd, args.in_device, "input")
+    out_dev = find_device(sd, args.out_device, "output")
+    capture_rate = device_rate(sd, in_dev, "input")
+    playback_rate = device_rate(sd, out_dev, "output")
+    chunk_n = int(args.chunk * capture_rate)
     if chunk_n == 0:
         raise ValueError("--chunk is too short to transcribe.")
 
@@ -625,17 +750,20 @@ def run(args: argparse.Namespace) -> None:
 
     def worker() -> None:
         pending = np.zeros(0, dtype=np.float32)
-        hold_raw = None
-        hold_out = None
         last_report = 0.0
-        overlap_n = overlap_sample_count(chunk_n)
         while not stop.is_set():
-            try:
-                block = in_q.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            pending = np.concatenate([pending, block])
-            pending, dropped = drop_stale_audio(pending, chunk_n)
+            blocks = []
+            while True:
+                try:
+                    blocks.append(in_q.get_nowait())
+                except queue.Empty:
+                    break
+            if not blocks and len(pending) < chunk_n:
+                try:
+                    blocks.append(in_q.get(timeout=0.2))
+                except queue.Empty:
+                    continue
+            pending, dropped = absorb_audio(pending, blocks, chunk_n, capture_rate)
             if dropped:
                 print(
                     f"   [warn] skipped {dropped:.1f}s to stay live.",
@@ -646,35 +774,18 @@ def run(args: argparse.Namespace) -> None:
             current = pending[:chunk_n].copy()
             pending = pending[chunk_n:]
             try:
-                if hold_raw is None:
-                    heard = transcribe_window(model, current, topics)
-                    spans = find_banned_spans(heard, topics)
-                    _report_censor(heard, spans, args.verbose)
-                    hold_raw = current
-                    hold_out = apply_static(current, spans, DEV_SR)
-                    continue
-                # * The new chunk is transcribed once. Only a short tail of the
-                # * held chunk is included, so a word on the boundary is visible.
-                tail = hold_raw[-overlap_n:]
-                heard = transcribe_window(
-                    model, np.concatenate([tail, current]), topics
-                )
-                spans = find_banned_spans(heard, topics)
-                _report_censor(heard, spans, args.verbose)
-                tail_spans, new_spans = split_boundary_spans(spans, overlap_n, DEV_SR)
-                censored_tail = apply_static(tail, tail_spans, DEV_SR)
-                hold_out = np.concatenate([hold_out[:-overlap_n], censored_tail])
-                emit(hold_out)
-                hold_raw = current
-                hold_out = apply_static(current, new_spans, DEV_SR)
+                # * The chunk plays as soon as its text is ready. A banned
+                # * phrase replaces the whole chunk, so word times are unused.
+                heard = transcribe_window(model, current, topics, capture_rate)
+                hits = matched_topics(heard, topics)
+                _report_censor(heard, hits, args.verbose)
+                audio = replace_with_static(current) if hits else current
+                emit(playback_audio(audio, capture_rate, playback_rate))
             except Exception as exc:
                 print(f"   [warn] transcription failed: {exc}", file=sys.stderr)
-                if hold_out is not None:
-                    emit(hold_out)
-                hold_raw = current
-                hold_out = current.copy()
+                emit(playback_audio(current, capture_rate, playback_rate))
                 continue
-            backlog = (in_q.qsize() * BLOCKSIZE + len(pending)) / DEV_SR
+            backlog = (in_q.qsize() * BLOCKSIZE + len(pending)) / capture_rate
             now = time.monotonic()
             if should_report_backlog(backlog, args.chunk, now, last_report):
                 last_report = now
@@ -682,11 +793,7 @@ def run(args: argparse.Namespace) -> None:
                     f"   [warn] audio is about {backlog:.0f}s behind.",
                     flush=True,
                 )
-        if hold_out is not None:
-            emit(hold_out)
 
-    in_dev = find_device(sd, args.in_device, "input")
-    out_dev = find_device(sd, args.out_device, "output")
     channels = output_channels(sd, out_dev)
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
@@ -694,7 +801,7 @@ def run(args: argparse.Namespace) -> None:
     with (
         sd.InputStream(
             device=in_dev,
-            samplerate=DEV_SR,
+            samplerate=capture_rate,
             channels=1,
             dtype="float32",
             blocksize=BLOCKSIZE,
@@ -702,7 +809,7 @@ def run(args: argparse.Namespace) -> None:
         ),
         sd.OutputStream(
             device=out_dev,
-            samplerate=DEV_SR,
+            samplerate=playback_rate,
             channels=channels,
             dtype="float32",
             blocksize=BLOCKSIZE,
@@ -712,7 +819,7 @@ def run(args: argparse.Namespace) -> None:
         print(
             "Live. Censoring: "
             + ", ".join(topics)
-            + ". Delay is about one chunk. Ctrl+C to stop."
+            + f". Mic {capture_rate} Hz, cable {playback_rate} Hz. Ctrl+C to stop."
         )
         try:
             while True:
@@ -721,7 +828,7 @@ def run(args: argparse.Namespace) -> None:
             stop.set()
             worker_thread.join(timeout=3)
             with lock:
-                remaining = len(out_buf) / DEV_SR
+                remaining = len(out_buf) / playback_rate
             if remaining > 0:
                 try:
                     sd.sleep(int(remaining * 1000) + 100)
