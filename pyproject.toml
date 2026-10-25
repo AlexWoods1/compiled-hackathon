@@ -1,10 +1,14 @@
 [project]
 name = "compiled-hackathon"
 version = "0.1.0"
-description = "Add your description here"
+description = "Live microphone censor for Zoom audio calls"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "numpy>=2.2",
+    "sounddevice>=0.5.6",
+]
 
 [dependency-groups]
 dev = [
